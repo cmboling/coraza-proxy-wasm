@@ -20,7 +20,7 @@ import (
 )
 
 var minGoVersion = "1.19"
-var tinygoMinorVersion = "0.26"
+var tinygoMinorVersion = "0.27"
 var addLicenseVersion = "04bfe4ee9ca5764577b029acc6a1957fd1997153" // https://github.com/google/addlicense
 var golangCILintVer = "v1.48.0"                                    // https://github.com/golangci/golangci-lint/releases
 var gosImportsVer = "v0.3.1"                                       // https://github.com/rinchsan/gosimports/releases/tag/v0.3.1
@@ -40,7 +40,7 @@ func init() {
 	}
 }
 
-// checkGoVersion checks the minium version of Go is supported.
+// checkGoVersion checks the minimum version of Go is supported.
 func checkGoVersion() error {
 	v, err := sh.Output("go", "version")
 	if err != nil {
@@ -165,7 +165,7 @@ func Build() error {
 		return err
 	}
 
-	var buildTags []string
+	buildTags := []string{"custommalloc", "no_fs_access"}
 	if os.Getenv("TIMING") == "true" {
 		buildTags = append(buildTags, "timing", "proxywasm_timing")
 	}
@@ -185,38 +185,11 @@ func Build() error {
 		}
 	}
 
-	wd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-
-	script := fmt.Sprintf(`
-cd /src && \
-tinygo build -gc=custom -opt=2 -o %s -scheduler=none -target=wasi %s`, filepath.Join("build", "mainraw.wasm"), buildTagArg)
-	if err := sh.RunV("docker", "run", "--pull=always", "--rm", "-v", fmt.Sprintf("%s:/src", wd), "ghcr.io/corazawaf/coraza-proxy-wasm/buildtools-tinygo:sha-63723e9",
-		"bash", "-c", script); err != nil {
+	if err := sh.RunV("tinygo", "build", "-gc=custom", "-opt=2", "-o", filepath.Join("build", "mainraw.wasm"), "-scheduler=none", "-target=wasi", buildTagArg); err != nil {
 		return err
 	}
 
 	return patchWasm(filepath.Join("build", "mainraw.wasm"), filepath.Join("build", "main.wasm"), initialPages)
-}
-
-// UpdateLibs updates the C++ filter dependencies.
-func UpdateLibs() error {
-	libs := []string{"aho-corasick", "bdwgc", "libinjection", "mimalloc"}
-	for _, lib := range libs {
-		if err := sh.RunV("docker", "build", "-t", "ghcr.io/corazawaf/coraza-proxy-wasm/buildtools-"+lib, filepath.Join("buildtools", lib)); err != nil {
-			return err
-		}
-		wd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
-		if err := sh.RunV("docker", "run", "-it", "--rm", "-v", fmt.Sprintf("%s:/out", filepath.Join(wd, "lib")), "ghcr.io/corazawaf/coraza-proxy-wasm/buildtools-"+lib); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // E2e runs e2e tests with a built plugin against the example deployment. Requires docker-compose.
@@ -237,6 +210,7 @@ func Ftw() error {
 	}()
 	env := map[string]string{
 		"FTW_CLOUDMODE": os.Getenv("FTW_CLOUDMODE"),
+		"FTW_INCLUDE":   os.Getenv("FTW_INCLUDE"),
 		"ENVOY_IMAGE":   os.Getenv("ENVOY_IMAGE"),
 	}
 	if os.Getenv("ENVOY_NOWASM") == "true" {
@@ -257,6 +231,11 @@ func RunExample() error {
 // TeardownExample tears down the test environment. Requires docker-compose.
 func TeardownExample() error {
 	return sh.RunV("docker-compose", "--file", "example/docker-compose.yml", "down")
+}
+
+// ReloadExample reload the test environment (container) in case of envoy or wasm update. Requires docker-compose
+func ReloadExample() error {
+	return sh.RunV("docker-compose", "--file", "example/docker-compose.yml", "restart")
 }
 
 var Default = Build

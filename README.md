@@ -64,7 +64,7 @@ In order to run the coraza-proxy-wasm we need to spin up an envoy configuration 
                         value: |
                         {
                             "rules": [
-                                "SecDebugLogLevel 5",
+                                "SecDebugLogLevel 9",
                                 "SecRuleEngine On",
                                 "SecRule REQUEST_URI \"@streq /admin\" \"id:101,phase:1,t:lowercase,deny\""
                             ]
@@ -88,7 +88,7 @@ configuration:
     "@type": "type.googleapis.com/google.protobuf.StringValue"
     value: |
     {
-        "rules": [ "SecDebugLogLevel 5", "SecRuleEngine On", "Include @owasp_crs/*.conf" ]
+        "rules": [ "SecDebugLogLevel 9", "SecRuleEngine On", "Include @owasp_crs/*.conf" ]
     }
 ```
 
@@ -99,13 +99,17 @@ configuration:
     "@type": "type.googleapis.com/google.protobuf.StringValue"
     value: |
     {
-        "rules": [ "SecDebugLogLevel 5", "SecRuleEngine On", "Include @owasp_crs/REQUEST-901-INITIALIZATION.conf" ]
+        "rules": [ "SecDebugLogLevel 9", "SecRuleEngine On", "Include @owasp_crs/REQUEST-901-INITIALIZATION.conf" ]
     }
 ```
 
+#### Recommendations using CRS with proxy-wasm
+
+- In order to mitigate as much as possible malicious requests (or connections open) sent upstream, it is recommended to keep the [CRS Early Blocking](https://coreruleset.org/20220302/the-case-for-early-blocking/) feature enabled (SecAction [`900120`](./wasmplugin/rules/crs-setup.conf.example)).
+
 ### Running go-ftw (CRS Regression tests)
 
-The following command runs the [go-ftw](https://github.com/fzipi/go-ftw) test suite against the filter with the CRS fully loaded.
+The following command runs the [go-ftw](https://github.com/coreruleset/go-ftw) test suite against the filter with the CRS fully loaded.
 
 ```bash
 go run mage.go ftw
@@ -113,9 +117,15 @@ go run mage.go ftw
 
 Take a look at its config file [ftw.yml](./ftw/ftw.yml) for details about tests currently excluded.
 
+One can also run a single test by executing:
+
+```bash
+FTW_INCLUDE=920410 go run mage.go ftw
+```
+
 ## Example: Spinning up the coraza-wasm-filter for manual tests
 
-Once the filter is built, via the commands `mage runExample` and `mage teardownExample` you can spin up and tear down the test environment. Envoy with the coraza-wasm filter will be reachable at `localhost:8080`. The filter is configured with the CRS loaded working in Anomaly Scoring mode. For details and locally tweaking the configuration refer to [@demo-conf](./wasmplugin/rules/coraza-demo.conf) and [@crs-setup-demo-conf](./wasmplugin/rules/crs-setup-demo.conf).
+Once the filter is built, via the commands `mage runExample`, `mage reloadExample`, and `mage teardownExample` you can spin up, test, and tear down the test environment. Envoy with the coraza-wasm filter will be reachable at `localhost:8080`. The filter is configured with the CRS loaded working in Anomaly Scoring mode. For details and locally tweaking the configuration refer to [@demo-conf](./wasmplugin/rules/coraza-demo.conf) and [@crs-setup-demo-conf](./wasmplugin/rules/crs-setup-demo.conf).
 In order to monitor envoy logs while performing requests you can run:
 
 - Envoy logs: `docker-compose -f ./example/docker-compose.yml logs -f envoy-logs`.

@@ -26,6 +26,15 @@ func checkTXMetric(t *testing.T, host proxytest.HostEmulator, expectedCounter in
 	require.Equal(t, uint64(expectedCounter), value)
 }
 
+var actionName = map[types.Action]string{
+	types.ActionPause:    "pause",
+	types.ActionContinue: "continue",
+}
+
+func requireEqualAction(t *testing.T, expected types.Action, actual types.Action, msg string) {
+	require.Equal(t, expected, actual, msg, actionName[expected], actionName[actual])
+}
+
 func TestLifecycle(t *testing.T) {
 	reqProtocol := "HTTP/1.1"
 	reqHdrs := [][2]string{
@@ -46,13 +55,15 @@ func TestLifecycle(t *testing.T) {
 	respBody := []byte(`Hello, yogi!`)
 
 	tests := []struct {
-		name               string
-		inlineRules        string
-		requestHdrsAction  types.Action
-		requestBodyAction  types.Action
-		responseHdrsAction types.Action
-		responded403       bool
-		respondedNullBody  bool
+		name                                string
+		inlineRules                         string
+		requestHdrsAction                   types.Action
+		requestBodyAction                   types.Action
+		responseHdrsAction                  types.Action
+		responded403                        bool
+		responded413                        bool
+		respondedNullBody                   bool
+		expectResponseRejectSinceFirstChunk bool
 	}{
 		{
 			name:               "no rules",
@@ -150,6 +161,17 @@ func TestLifecycle(t *testing.T) {
 			respondedNullBody:  false,
 		},
 		{
+			name: "server name denied",
+			inlineRules: `
+			SecRuleEngine On\nSecRule SERVER_NAME \"@streq localhost\" \"id:101,phase:1,t:lowercase,deny\"
+			`,
+			requestHdrsAction:  types.ActionPause,
+			requestBodyAction:  types.ActionContinue,
+			responseHdrsAction: types.ActionContinue,
+			responded403:       true,
+			respondedNullBody:  false,
+		},
+		{
 			name: "request header value accepted",
 			inlineRules: `
 			SecRuleEngine On\nSecRule REQUEST_HEADERS:user-agent \"@streq rusttest\" \"id:101,phase:1,t:lowercase,deny\"
@@ -204,17 +226,39 @@ func TestLifecycle(t *testing.T) {
 			responded403:       true,
 			respondedNullBody:  false,
 		},
-		// {
-		// 	name: "request body accepted, no access",
-		// 	inlineRules: `
-		// SecRuleEngine On\nSecRequestBodyAccess Off\nSecRule REQUEST_BODY \"animal=bear\" \"id:101,phase:2,t:lowercase,deny\"
-		// `,
-		// 	requestHdrsAction:  types.ActionContinue,
-		// 	requestBodyAction:  types.ActionContinue,
-		// 	responseHdrsAction: types.ActionContinue,
-		// 	responded403:       false,
-		// 	respondedNullBody:  false,
-		// },
+		{
+			name: "request body accepted, no request body access",
+			inlineRules: `
+		SecRuleEngine On\nSecRequestBodyAccess Off\nSecRule REQUEST_BODY \"animal=bear\" \"id:101,phase:2,t:lowercase,deny\"
+		`,
+			requestHdrsAction:  types.ActionContinue,
+			requestBodyAction:  types.ActionContinue,
+			responseHdrsAction: types.ActionContinue,
+			responded403:       false,
+			respondedNullBody:  false,
+		},
+		{
+			name: "request body accepted, payload above process partial",
+			inlineRules: `
+		SecRuleEngine On\nSecRequestBodyAccess On\nSecRequestBodyLimit 2\nSecRequestBodyLimitAction ProcessPartial\nSecRule REQUEST_BODY \"animal=bear\" \"id:101,phase:2,t:lowercase,deny\"
+		`,
+			requestHdrsAction:  types.ActionContinue,
+			requestBodyAction:  types.ActionContinue,
+			responseHdrsAction: types.ActionContinue,
+			responded403:       false,
+			respondedNullBody:  false,
+		},
+		{
+			name: "request body denied, above limits",
+			inlineRules: `
+			SecRuleEngine On\nSecRequestBodyAccess On\nSecRequestBodyLimit 2\nSecRequestBodyLimitAction Reject\nSecRule REQUEST_BODY \"name=yogi\" \"id:101,phase:2,t:lowercase,deny\"
+			`,
+			requestHdrsAction:  types.ActionContinue,
+			requestBodyAction:  types.ActionPause,
+			responseHdrsAction: types.ActionContinue,
+			responded413:       true,
+			respondedNullBody:  false,
+		},
 		{
 			name: "status accepted",
 			inlineRules: `
@@ -317,7 +361,7 @@ func TestLifecycle(t *testing.T) {
 		{
 			name: "response body denied, end of body",
 			inlineRules: `
-			SecRuleEngine On\nSecResponseBodyAccess On\nSecRule RESPONSE_BODY \"@contains yogi\" \"id:101,phase:4,t:lowercase,deny\"
+			SecRuleEngine On\nSecResponseBodyAccess On\nSecResponseBodyMimeType text/plain\nSecRule RESPONSE_BODY \"@contains yogi\" \"id:101,phase:4,t:lowercase,deny\"
 			`,
 			requestHdrsAction:  types.ActionContinue,
 			requestBodyAction:  types.ActionContinue,
@@ -328,7 +372,7 @@ func TestLifecycle(t *testing.T) {
 		{
 			name: "response body denied, start of body",
 			inlineRules: `
-			SecRuleEngine On\nSecResponseBodyAccess On\nSecRule RESPONSE_BODY \"@contains hello\" \"id:101,phase:4,t:lowercase,deny\"
+			SecRuleEngine On\nSecResponseBodyAccess On\nSecResponseBodyMimeType text/plain\nSecRule RESPONSE_BODY \"@contains hello\" \"id:101,phase:4,t:lowercase,deny\"
 			`,
 			requestHdrsAction:  types.ActionContinue,
 			requestBodyAction:  types.ActionContinue,
@@ -346,6 +390,29 @@ func TestLifecycle(t *testing.T) {
 			responseHdrsAction: types.ActionContinue,
 			responded403:       false,
 			respondedNullBody:  false,
+		},
+		{
+			name: "response body accepted, payload above process partial",
+			inlineRules: `
+			SecRuleEngine On\nSecResponseBodyAccess On\nSecResponseBodyLimit 2\nSecResponseBodyLimitAction ProcessPartial\nSecRule RESPONSE_BODY \"@contains hello\" \"id:101,phase:4,t:lowercase,deny\"
+			`,
+			requestHdrsAction:  types.ActionContinue,
+			requestBodyAction:  types.ActionContinue,
+			responseHdrsAction: types.ActionContinue,
+			responded403:       false,
+			respondedNullBody:  false,
+		},
+		{
+			name: "response body denied, above limits",
+			inlineRules: `
+			SecRuleEngine On\nSecResponseBodyAccess On\nSecResponseBodyLimit 2\nSecResponseBodyLimitAction Reject\nSecRule RESPONSE_BODY \"@contains hello\" \"id:101,phase:4,t:lowercase,deny\"
+			`,
+			requestHdrsAction:                   types.ActionContinue,
+			requestBodyAction:                   types.ActionContinue,
+			responseHdrsAction:                  types.ActionContinue,
+			responded403:                        false, // proxy-wasm does not support it at phase 4
+			respondedNullBody:                   true,
+			expectResponseRejectSinceFirstChunk: true,
 		},
 	}
 
@@ -392,10 +459,14 @@ func TestLifecycle(t *testing.T) {
 							body = reqBody[i : i+5]
 						}
 						requestBodyAction = host.CallOnRequestBody(id, body, eos)
-						if eos {
-							require.Equal(t, tt.requestBodyAction, requestBodyAction)
-						} else {
-							require.Equal(t, types.ActionPause, requestBodyAction)
+						requestBodyAccess := strings.Contains(tt.inlineRules, "SecRequestBodyAccess On")
+						switch {
+						case eos:
+							requireEqualAction(t, tt.requestBodyAction, requestBodyAction, "unexpected body action, want %q, have %q on end of stream")
+						case requestBodyAccess:
+							requireEqualAction(t, types.ActionPause, requestBodyAction, "unexpected request body action, want %q, have %q")
+						default:
+							requireEqualAction(t, types.ActionContinue, requestBodyAction, "unexpected request body action, want %q, have %q")
 						}
 					}
 				}
@@ -417,12 +488,15 @@ func TestLifecycle(t *testing.T) {
 						}
 						responseBodyAction := host.CallOnResponseBody(id, body, eos)
 						switch {
-						case eos:
-							require.Equal(t, types.ActionContinue, responseBodyAction)
+						// expectResponseRejectLimitActionSinceFirstChunk: writing the first chunk (len(respBody) bytes), it is expected to reach
+						// the ResponseBodyLimit with the Action set to Reject. When these conditions happen, ActionContinue will be returned,
+						// with the interruption enforced replacing the body with null bytes (checked with tt.respondedNullBody)
+						case eos, tt.expectResponseRejectSinceFirstChunk:
+							requireEqualAction(t, types.ActionContinue, responseBodyAction, "unexpected response body action, want %q, have %q on end of stream")
 						case responseBodyAccess:
-							require.Equal(t, types.ActionPause, responseBodyAction)
+							requireEqualAction(t, types.ActionPause, responseBodyAction, "unexpected response body action, want %q, have %q")
 						default:
-							require.Equal(t, types.ActionContinue, responseBodyAction)
+							requireEqualAction(t, types.ActionContinue, responseBodyAction, "unexpected response body action, want %q, have %q")
 						}
 					}
 				}
@@ -431,16 +505,20 @@ func TestLifecycle(t *testing.T) {
 				host.CompleteHttpContext(id)
 
 				pluginResp := host.GetSentLocalResponse(id)
-				if tt.responded403 {
+				switch {
+				case tt.responded403:
 					require.NotNil(t, pluginResp)
 					require.EqualValues(t, 403, pluginResp.StatusCode)
-				} else {
+				case tt.responded413:
+					require.NotNil(t, pluginResp)
+					require.EqualValues(t, 413, pluginResp.StatusCode)
+				default:
 					require.Nil(t, pluginResp)
 				}
 				if tt.respondedNullBody {
 					pluginBodyResp := host.GetCurrentResponseBody(id)
 					require.NotNil(t, pluginBodyResp)
-					require.EqualValues(t, byte('\x00'), pluginBodyResp[0])
+					require.EqualValues(t, bytes.Repeat([]byte("\x00"), len(pluginBodyResp)), pluginBodyResp)
 				}
 			})
 		}
@@ -456,7 +534,7 @@ func TestBadConfig(t *testing.T) {
 		{
 			name: "bad json",
 			conf: "{",
-			msg:  `error parsing plugin configuration:`,
+			msg:  `Failed to parse plugin configuration:`,
 		},
 	}
 
@@ -492,14 +570,14 @@ func TestBadRequest(t *testing.T) {
 			reqHdrs: [][2]string{
 				{":method", "GET"},
 			},
-			msg: "failed to get :path",
+			msg: "Failed to get :path",
 		},
 		{
 			name: "missing method",
 			reqHdrs: [][2]string{
 				{":path", "/hello"},
 			},
-			msg: "failed to get :method",
+			msg: "Failed to get :method",
 		},
 	}
 
@@ -521,7 +599,7 @@ func TestBadRequest(t *testing.T) {
 				action := host.CallOnRequestHeaders(id, tt.reqHdrs, false)
 				require.Equal(t, types.ActionContinue, action)
 
-				logs := strings.Join(host.GetCriticalLogs(), "\n")
+				logs := strings.Join(host.GetErrorLogs(), "\n")
 				require.Contains(t, logs, tt.msg)
 			})
 		}
@@ -539,7 +617,7 @@ func TestBadResponse(t *testing.T) {
 			respHdrs: [][2]string{
 				{"content-length", "12"},
 			},
-			msg: "failed to get :status",
+			msg: "Failed to get :status",
 		},
 	}
 
@@ -561,7 +639,7 @@ func TestBadResponse(t *testing.T) {
 				action := host.CallOnResponseHeaders(id, tt.respHdrs, false)
 				require.Equal(t, types.ActionContinue, action)
 
-				logs := strings.Join(host.GetCriticalLogs(), "\n")
+				logs := strings.Join(host.GetErrorLogs(), "\n")
 				require.Contains(t, logs, tt.msg)
 			})
 		}
@@ -897,6 +975,64 @@ func TestRetrieveAddressInfo(t *testing.T) {
 					require.Equal(t, tt.requestHdrsAction, action)
 				})
 			}
+		}
+	})
+}
+
+func TestParseServerName(t *testing.T) {
+	testCases := map[string]struct {
+		autorityHeader string
+		expServerName  string
+	}{
+		"authority with port": {
+			autorityHeader: "coraza.io:443",
+			expServerName:  "coraza.io",
+		},
+		"authority without port": {
+			autorityHeader: "coraza.io",
+			expServerName:  "coraza.io",
+		},
+		"IPv6 with port": {
+			autorityHeader: "[2001:db8::1]:8080",
+			expServerName:  "2001:db8::1",
+		},
+		"IPv6": {
+			autorityHeader: "2001:db8::1",
+			expServerName:  "2001:db8::1",
+		},
+		"bad format": {
+			autorityHeader: "hostA:hostB:8080",
+			expServerName:  "hostA:hostB:8080",
+		},
+	}
+	vmTest(t, func(t *testing.T, vm types.VMContext) {
+		for name, tCase := range testCases {
+			inlineRules := fmt.Sprintf(`
+			SecRuleEngine On\nSecRule SERVER_NAME \"@streq %s\" \"id:101,phase:1,deny\"`, tCase.expServerName)
+
+			conf := `{}`
+			if inlineRules := strings.TrimSpace(inlineRules); inlineRules != "" {
+				conf = fmt.Sprintf(`{"rules": ["%s"]}`, inlineRules)
+			}
+			t.Run(name, func(t *testing.T) {
+				opt := proxytest.
+					NewEmulatorOption().
+					WithVMContext(vm).
+					WithPluginConfiguration([]byte(conf))
+
+				host, reset := proxytest.NewHostEmulator(opt)
+				defer reset()
+
+				require.Equal(t, types.OnPluginStartStatusOK, host.StartPlugin())
+				id := host.InitializeHttpContext()
+				reqHdrs := [][2]string{
+					{":path", "/hello"},
+					{":method", "GET"},
+					{":authority", tCase.autorityHeader},
+				}
+				action := host.CallOnRequestHeaders(id, reqHdrs, false)
+				require.Equal(t, types.ActionPause, action)
+			})
 		}
 	})
 }
